@@ -184,10 +184,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         conversion_type = query.data.split('_')[1]
         context.user_data['conversion_type'] = conversion_type
         if conversion_type == 'voice':
-            # Skip format selection for voice messages
+            # Skip format, quality, and filename selection for voice messages
             context.user_data['format'] = 'ogg'  # Voice messages are always OGG
-            await show_quality_buttons(update, context)
-            return CHOOSING_QUALITY
+            context.user_data['quality'] = 'medium'  # Use default quality
+            context.user_data['filename'] = generate_default_filename('voice')
+            await process_conversion(update, context)
+            return ConversationHandler.END
         else:
             await show_format_buttons(update, context)
             return CHOOSING_FORMAT
