@@ -14,9 +14,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Conversation states
-WAITING_FOR_FILENAME = 1
+CHOOSING_CONVERSION_TYPE = 1
 CHOOSING_FORMAT = 2
 CHOOSING_QUALITY = 3
+WAITING_FOR_FILENAME = 4
 
 # Quality presets
 QUALITY_PRESETS = {
@@ -69,21 +70,62 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(help_text)
 
-async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming audio file and ask for format."""
-    context.user_data['file_id'] = update.message.audio.file_id
-    context.user_data['file_type'] = 'audio'
-    context.user_data['default_filename'] = generate_default_filename('audio')
-    await show_format_buttons(update, context)
-    return CHOOSING_FORMAT
+async def show_conversion_type_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show conversion type selection buttons."""
+    keyboard = [
+        [
+            InlineKeyboardButton("Convert to Audio", callback_data='type_audio'),
+            InlineKeyboardButton("Convert to Voice", callback_data='type_voice')
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text('What would you like to convert this to?', reply_markup=reply_markup)
 
-async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming voice message and ask for format."""
-    context.user_data['file_id'] = update.message.voice.file_id
-    context.user_data['file_type'] = 'voice'
-    context.user_data['default_filename'] = generate_default_filename('voice')
-    await show_format_buttons(update, context)
-    return CHOOSING_FORMAT
+async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle audio files and forwarded messages."""
+    try:
+        audio = update.message.audio
+        if not audio:
+            await update.message.reply_text("Please send an audio file.")
+            return ConversationHandler.END
+            
+        # Download the file
+        file = await context.bot.get_file(audio.file_id)
+        file_path = f"temp_{audio.file_id}.{audio.file_name.split('.')[-1]}"
+        await file.download_to_drive(file_path)
+        
+        # Store file path and show conversion type options
+        context.user_data['file_path'] = file_path
+        context.user_data['original_type'] = 'audio'
+        await show_conversion_type_buttons(update, context)
+        return CHOOSING_CONVERSION_TYPE
+            
+    except Exception as e:
+        await update.message.reply_text(f"Error processing audio: {str(e)}")
+        return ConversationHandler.END
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle voice messages."""
+    try:
+        voice = update.message.voice
+        if not voice:
+            await update.message.reply_text("Please send a voice message.")
+            return ConversationHandler.END
+            
+        # Download the file
+        file = await context.bot.get_file(voice.file_id)
+        file_path = f"temp_{voice.file_id}.ogg"  # Voice messages are in OGG format
+        await file.download_to_drive(file_path)
+        
+        # Store file path and show conversion type options
+        context.user_data['file_path'] = file_path
+        context.user_data['original_type'] = 'voice'
+        await show_conversion_type_buttons(update, context)
+        return CHOOSING_CONVERSION_TYPE
+            
+    except Exception as e:
+        await update.message.reply_text(f"Error processing voice message: {str(e)}")
+        return ConversationHandler.END
 
 async def show_format_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show format selection buttons."""
@@ -129,7 +171,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query
     await query.answer()
     
-    if query.data.startswith('format_'):
+    if query.data.startswith('type_'):
+        conversion_type = query.data.split('_')[1]
+        context.user_data['conversion_type'] = conversion_type
+        await show_format_buttons(update, context)
+        return CHOOSING_FORMAT
+    elif query.data.startswith('format_'):
         context.user_data['format'] = query.data.split('_')[1]
         await show_quality_buttons(update, context)
         return CHOOSING_QUALITY
@@ -143,92 +190,71 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def process_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process the conversion with the selected options."""
     try:
-        file_id = context.user_data.get('file_id')
-        file_type = context.user_data.get('file_type')
+        file_path = context.user_data.get('file_path')
+        conversion_type = context.user_data.get('conversion_type')
         output_format = context.user_data.get('format', 'mp3')
         quality = context.user_data.get('quality', 'medium')
         filename = context.user_data.get('filename', '')
         
-        if not file_id or not file_type:
+        if not file_path:
             await update.message.reply_text("Something went wrong. Please try sending the file again.")
             return ConversationHandler.END
 
-        # Get the file
-        file = await context.bot.get_file(file_id)
+        # Get quality settings
+        quality_settings = QUALITY_PRESETS[output_format][quality]
         
-        # Get bitrate based on format and quality
-        bitrate = QUALITY_PRESETS[quality][output_format]
+        # Set output file path
+        output_path = f"{filename}.{output_format}"
         
-        if file_type == 'audio':
-            # Create temporary files
-            with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as input_file, \
-                 tempfile.NamedTemporaryFile(suffix=f'.{output_format}', delete=False) as output_file:
-                
-                # Download the file
-                await file.download_to_drive(input_file.name)
-                
-                # Convert the file using ffmpeg
-                stream = ffmpeg.input(input_file.name)
-                if output_format == 'mp3':
-                    stream = ffmpeg.output(stream, output_file.name, acodec='libmp3lame', audio_bitrate=bitrate)
-                elif output_format == 'wav':
-                    stream = ffmpeg.output(stream, output_file.name, acodec='pcm_s16le', audio_bitrate=bitrate)
-                else:  # ogg
-                    stream = ffmpeg.output(stream, output_file.name, acodec='libopus', audio_bitrate=bitrate)
-                
-                ffmpeg.run(stream, overwrite_output=True, quiet=True)
-                
-                # Send the converted file
-                with open(output_file.name, 'rb') as audio:
-                    await update.message.reply_audio(
-                        audio=audio,
-                        title=filename,
-                        performer="Audio Bot"
-                    )
-                
-                # Clean up
-                os.unlink(input_file.name)
-                os.unlink(output_file.name)
-                
-        else:  # voice message
-            # Create temporary files
-            with tempfile.NamedTemporaryFile(suffix='.ogg', delete=False) as input_file, \
-                 tempfile.NamedTemporaryFile(suffix=f'.{output_format}', delete=False) as output_file:
-                
-                # Download the file
-                await file.download_to_drive(input_file.name)
-                
-                # Convert the file using ffmpeg
-                stream = ffmpeg.input(input_file.name)
-                if output_format == 'mp3':
-                    stream = ffmpeg.output(stream, output_file.name, acodec='libmp3lame', audio_bitrate=bitrate)
-                elif output_format == 'wav':
-                    stream = ffmpeg.output(stream, output_file.name, acodec='pcm_s16le', audio_bitrate=bitrate)
-                else:  # ogg
-                    stream = ffmpeg.output(stream, output_file.name, acodec='libopus', audio_bitrate=bitrate)
-                
-                ffmpeg.run(stream, overwrite_output=True, quiet=True)
-                
-                # Send the converted file
-                with open(output_file.name, 'rb') as audio:
-                    await update.message.reply_audio(
-                        audio=audio,
-                        title=filename,
-                        performer="Voice Bot"
-                    )
-                
-                # Clean up
-                os.unlink(input_file.name)
-                os.unlink(output_file.name)
+        # Convert the file
+        if output_format == 'mp3':
+            stream = ffmpeg.input(file_path)
+            stream = ffmpeg.output(stream, output_path, 
+                                 audio_bitrate=quality_settings['bitrate'],
+                                 acodec='libmp3lame')
+        elif output_format == 'wav':
+            stream = ffmpeg.input(file_path)
+            stream = ffmpeg.output(stream, output_path,
+                                 acodec='pcm_s16le',
+                                 ar=quality_settings['sample_rate'])
+        elif output_format == 'ogg':
+            stream = ffmpeg.input(file_path)
+            stream = ffmpeg.output(stream, output_path,
+                                 audio_bitrate=quality_settings['bitrate'],
+                                 acodec='libvorbis')
+            
+        ffmpeg.run(stream, overwrite_output=True)
+        
+        # Send the converted file
+        with open(output_path, 'rb') as audio_file:
+            if conversion_type == 'voice':
+                await context.bot.send_voice(
+                    chat_id=update.effective_chat.id,
+                    voice=audio_file
+                )
+            else:
+                await context.bot.send_audio(
+                    chat_id=update.effective_chat.id,
+                    audio=audio_file,
+                    title=f"{filename}.{output_format}"
+                )
+            
+        # Clean up
+        os.remove(file_path)
+        os.remove(output_path)
         
         # Clear user data
         context.user_data.clear()
         
     except Exception as e:
-        logger.error(f"Error processing file: {e}")
-        await update.message.reply_text("Sorry, I couldn't process the file. Please try again.")
-    
-    return ConversationHandler.END
+        await update.message.reply_text(f"Error during conversion: {str(e)}")
+        # Clean up any remaining files
+        if 'file_path' in context.user_data:
+            try:
+                os.remove(context.user_data['file_path'])
+            except:
+                pass
+        context.user_data.clear()
 
 async def handle_filename(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the filename input."""
@@ -259,6 +285,7 @@ def main():
             MessageHandler(filters.VOICE, handle_voice)
         ],
         states={
+            CHOOSING_CONVERSION_TYPE: [CallbackQueryHandler(button_handler)],
             CHOOSING_FORMAT: [CallbackQueryHandler(button_handler)],
             CHOOSING_QUALITY: [CallbackQueryHandler(button_handler)],
             WAITING_FOR_FILENAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_filename)]
