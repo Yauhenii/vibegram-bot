@@ -183,8 +183,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if query.data.startswith('type_'):
         conversion_type = query.data.split('_')[1]
         context.user_data['conversion_type'] = conversion_type
-        await show_format_buttons(update, context)
-        return CHOOSING_FORMAT
+        if conversion_type == 'voice':
+            # Skip format selection for voice messages
+            context.user_data['format'] = 'ogg'  # Voice messages are always OGG
+            await show_quality_buttons(update, context)
+            return CHOOSING_QUALITY
+        else:
+            await show_format_buttons(update, context)
+            return CHOOSING_FORMAT
     elif query.data.startswith('format_'):
         context.user_data['format'] = query.data.split('_')[1]
         await show_quality_buttons(update, context)
