@@ -272,7 +272,7 @@ async def process_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE)
         conversion_type = context.user_data.get('conversion_type')
         output_format = context.user_data.get('format', 'mp3')
         quality = context.user_data.get('quality', 'medium')
-        filename = context.user_data.get('filename', '')
+        filename = context.user_data.get('filename', 'output')  # Default filename if none provided
         
         logger.info(f"Conversion parameters: type={conversion_type}, format={output_format}, quality={quality}, filename={filename}")
         
@@ -311,40 +311,45 @@ async def process_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.info(f"Using quality settings: {quality_settings}")
         
         # Set output file path
-        output_path = f"{filename}.{output_format}"
+        output_path = f"{filename}.{output_format}" if filename else f"output.{output_format}"
         logger.info(f"Output path: {output_path}")
         
         # Convert the file
         logger.info("Starting ffmpeg conversion")
+        stream = ffmpeg.input(file_path)
+        
+        # Set conversion parameters
+        conversion_args = {}
         if output_format == 'mp3':
-            stream = ffmpeg.input(file_path)
-            stream = ffmpeg.output(stream, output_path, 
-                                 audio_bitrate=quality_settings,
-                                 acodec='libmp3lame')
+            conversion_args.update({
+                'audio_bitrate': quality_settings,
+                'acodec': 'libmp3lame'
+            })
         elif output_format == 'wav':
-            stream = ffmpeg.input(file_path)
-            stream = ffmpeg.output(stream, output_path,
-                                 acodec='pcm_s16le',
-                                 ar=quality_settings)
+            conversion_args.update({
+                'acodec': 'pcm_s16le',
+                'ar': quality_settings
+            })
         elif output_format == 'ogg':
-            stream = ffmpeg.input(file_path)
             if conversion_type == 'voice':
-                stream = ffmpeg.output(stream, output_path,
-                                     acodec='libopus',
-                                     audio_bitrate='64k',
-                                     ar='48000',
-                                     ac=1,
-                                     application='voip')
+                conversion_args.update({
+                    'acodec': 'libopus',
+                    'audio_bitrate': '64k',
+                    'ar': '48000',
+                    'ac': 1,
+                    'application': 'voip'
+                })
             else:
-                stream = ffmpeg.output(stream, output_path,
-                                     audio_bitrate=quality_settings,
-                                     acodec='libvorbis')
+                conversion_args.update({
+                    'audio_bitrate': quality_settings,
+                    'acodec': 'libvorbis'
+                })
         
         # Run conversion with progress tracking
         process = (
             ffmpeg
             .input(file_path)
-            .output(output_path, **stream.get_args()[1])
+            .output(output_path, **conversion_args)
             .overwrite_output()
             .run_async(pipe_stdout=True, pipe_stderr=True)
         )
