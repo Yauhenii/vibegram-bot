@@ -124,27 +124,41 @@ async def show_filename_options(update: Update, context: ContextTypes.DEFAULT_TY
         reply_markup=reply_markup
     )
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle button presses."""
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-
-    if query.data.startswith('format_'):
-        context.user_data['format'] = query.data.split('_')[1]
+    
+    data = query.data.split(':')
+    action = data[0]
+    
+    if action == 'format':
+        format_type = data[1]
+        context.user_data['format'] = format_type
         await show_quality_buttons(update, context)
         return CHOOSING_QUALITY
-    elif query.data.startswith('quality_'):
-        context.user_data['quality'] = query.data.split('_')[1]
+        
+    elif action == 'quality':
+        quality = data[1]
+        context.user_data['quality'] = quality
         await show_filename_options(update, context)
         return WAITING_FOR_FILENAME
-    elif query.data == 'filename_default':
-        # Use default filename and proceed with conversion
-        context.user_data['filename'] = context.user_data.get('default_filename', '')
-        await process_conversion(update, context)
-        return ConversationHandler.END
-    elif query.data == 'filename_custom':
-        await query.message.reply_text("Please send me the desired filename (without extension):")
-        return WAITING_FOR_FILENAME
+        
+    elif action == 'filename':
+        choice = data[1]
+        if choice == 'default':
+            # Use the default filename that was already set
+            await process_conversion(update, context)
+            return ConversationHandler.END
+        elif choice == 'custom':
+            await query.message.reply_text(
+                "Please enter your custom filename (without extension):"
+            )
+            return WAITING_FOR_FILENAME
+        elif choice == 'cancel':
+            await query.message.reply_text("Operation cancelled.")
+            return ConversationHandler.END
+            
+    return ConversationHandler.END
 
 async def process_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process the conversion with the selected options."""
