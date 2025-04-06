@@ -232,7 +232,8 @@ async def process_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         if not file_path:
             logger.error("No file path found in user data")
-            await update.message.reply_text("Something went wrong. Please try sending the file again.")
+            message = update.message if update.message else update.callback_query.message
+            await message.reply_text("Something went wrong. Please try sending the file again.")
             return ConversationHandler.END
 
         # Get quality settings
@@ -275,8 +276,7 @@ async def process_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     await context.bot.send_voice(
                         chat_id=update.effective_chat.id,
                         voice=audio_file,
-                        duration=original_voice.duration,
-                        waveform=original_voice.waveform if hasattr(original_voice, 'waveform') else None
+                        duration=original_voice.duration
                     )
                 else:
                     # For audio files converted to voice, generate a simple waveform
@@ -303,7 +303,8 @@ async def process_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
     except Exception as e:
         logger.error(f"Error during conversion: {str(e)}", exc_info=True)
-        await update.message.reply_text(f"Error during conversion: {str(e)}")
+        message = update.message if update.message else update.callback_query.message
+        await message.reply_text(f"Error during conversion: {str(e)}")
         # Clean up any remaining files
         if 'file_path' in context.user_data:
             try:
