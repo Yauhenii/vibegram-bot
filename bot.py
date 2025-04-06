@@ -4,6 +4,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler, CallbackQueryHandler
 import ffmpeg
 import tempfile
+from datetime import datetime
 
 # Enable logging
 logging.basicConfig(
@@ -36,6 +37,11 @@ QUALITY_PRESETS = {
     }
 }
 
+def generate_default_filename(file_type):
+    """Generate a default filename based on current timestamp and file type."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"{file_type}_{timestamp}"
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send a message when the command /start is issued."""
     await update.message.reply_text(
@@ -67,6 +73,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle incoming audio file and ask for format."""
     context.user_data['file_id'] = update.message.audio.file_id
     context.user_data['file_type'] = 'audio'
+    context.user_data['default_filename'] = generate_default_filename('audio')
     await show_format_buttons(update, context)
     return CHOOSING_FORMAT
 
@@ -74,6 +81,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle incoming voice message and ask for format."""
     context.user_data['file_id'] = update.message.voice.file_id
     context.user_data['file_type'] = 'voice'
+    context.user_data['default_filename'] = generate_default_filename('voice')
     await show_format_buttons(update, context)
     return CHOOSING_FORMAT
 
@@ -101,6 +109,21 @@ async def show_quality_buttons(update: Update, context: ContextTypes.DEFAULT_TYP
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.callback_query.message.reply_text('Please choose the quality:', reply_markup=reply_markup)
 
+async def show_filename_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show filename options."""
+    default_filename = context.user_data.get('default_filename', '')
+    keyboard = [
+        [
+            InlineKeyboardButton("Use Default", callback_data='filename_default'),
+            InlineKeyboardButton("Custom Name", callback_data='filename_custom')
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.message.reply_text(
+        f'Default filename: {default_filename}\nWould you like to use this name or provide a custom one?',
+        reply_markup=reply_markup
+    )
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle button presses."""
     query = update.callback_query
@@ -112,21 +135,25 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CHOOSING_QUALITY
     elif query.data.startswith('quality_'):
         context.user_data['quality'] = query.data.split('_')[1]
+        await show_filename_options(update, context)
+        return WAITING_FOR_FILENAME
+    elif query.data == 'filename_default':
+        # Use default filename and proceed with conversion
+        context.user_data['filename'] = context.user_data.get('default_filename', '')
+        await process_conversion(update, context)
+        return ConversationHandler.END
+    elif query.data == 'filename_custom':
         await query.message.reply_text("Please send me the desired filename (without extension):")
         return WAITING_FOR_FILENAME
 
-async def handle_filename(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process the filename and perform the conversion."""
-    filename = update.message.text.strip()
-    if not filename:
-        await update.message.reply_text("Please provide a valid filename.")
-        return WAITING_FOR_FILENAME
-
+async def process_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process the conversion with the selected options."""
     try:
         file_id = context.user_data.get('file_id')
         file_type = context.user_data.get('file_type')
         output_format = context.user_data.get('format', 'mp3')
         quality = context.user_data.get('quality', 'medium')
+        filename = context.user_data.get('filename', '')
         
         if not file_id or not file_type:
             await update.message.reply_text("Something went wrong. Please try sending the file again.")
@@ -207,6 +234,17 @@ async def handle_filename(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error processing file: {e}")
         await update.message.reply_text("Sorry, I couldn't process the file. Please try again.")
     
+    return ConversationHandler.END
+
+async def handle_filename(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process the custom filename and perform the conversion."""
+    filename = update.message.text.strip()
+    if not filename:
+        await update.message.reply_text("Please provide a valid filename.")
+        return WAITING_FOR_FILENAME
+    
+    context.user_data['filename'] = filename
+    await process_conversion(update, context)
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
