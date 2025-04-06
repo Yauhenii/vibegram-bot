@@ -190,42 +190,51 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def process_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process the conversion with the selected options."""
     try:
+        logger.info("Starting conversion process")
         file_path = context.user_data.get('file_path')
         conversion_type = context.user_data.get('conversion_type')
         output_format = context.user_data.get('format', 'mp3')
         quality = context.user_data.get('quality', 'medium')
         filename = context.user_data.get('filename', '')
         
+        logger.info(f"Conversion parameters: type={conversion_type}, format={output_format}, quality={quality}, filename={filename}")
+        
         if not file_path:
+            logger.error("No file path found in user data")
             await update.message.reply_text("Something went wrong. Please try sending the file again.")
             return ConversationHandler.END
 
         # Get quality settings
-        quality_settings = QUALITY_PRESETS[output_format][quality]
+        quality_settings = QUALITY_PRESETS[quality][output_format]
+        logger.info(f"Using quality settings: {quality_settings}")
         
         # Set output file path
         output_path = f"{filename}.{output_format}"
+        logger.info(f"Output path: {output_path}")
         
         # Convert the file
+        logger.info("Starting ffmpeg conversion")
         if output_format == 'mp3':
             stream = ffmpeg.input(file_path)
             stream = ffmpeg.output(stream, output_path, 
-                                 audio_bitrate=quality_settings['bitrate'],
+                                 audio_bitrate=quality_settings,
                                  acodec='libmp3lame')
         elif output_format == 'wav':
             stream = ffmpeg.input(file_path)
             stream = ffmpeg.output(stream, output_path,
                                  acodec='pcm_s16le',
-                                 ar=quality_settings['sample_rate'])
+                                 ar=quality_settings)
         elif output_format == 'ogg':
             stream = ffmpeg.input(file_path)
             stream = ffmpeg.output(stream, output_path,
-                                 audio_bitrate=quality_settings['bitrate'],
+                                 audio_bitrate=quality_settings,
                                  acodec='libvorbis')
             
         ffmpeg.run(stream, overwrite_output=True)
+        logger.info("ffmpeg conversion completed")
         
         # Send the converted file
+        logger.info(f"Sending converted file as {conversion_type}")
         with open(output_path, 'rb') as audio_file:
             if conversion_type == 'voice':
                 await context.bot.send_voice(
@@ -240,13 +249,16 @@ async def process_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
             
         # Clean up
+        logger.info("Cleaning up temporary files")
         os.remove(file_path)
         os.remove(output_path)
         
         # Clear user data
         context.user_data.clear()
+        logger.info("Conversion process completed successfully")
         
     except Exception as e:
+        logger.error(f"Error during conversion: {str(e)}", exc_info=True)
         await update.message.reply_text(f"Error during conversion: {str(e)}")
         # Clean up any remaining files
         if 'file_path' in context.user_data:
