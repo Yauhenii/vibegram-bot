@@ -184,7 +184,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.user_data['quality'] = query.data.split('_')[1]
         await query.message.reply_text("Please send me the desired filename (without extension):")
         return WAITING_FOR_FILENAME
-        
+    elif query.data.startswith('filename_'):
+        choice = query.data.split('_')[1]
+        if choice == 'default':
+            context.user_data['filename'] = generate_default_filename(context.user_data.get('original_type', 'audio'))
+            await process_conversion(update, context)
+            return ConversationHandler.END
+        elif choice == 'custom':
+            await query.message.reply_text("Please send me the desired filename (without extension):")
+            return WAITING_FOR_FILENAME
+        elif choice == 'cancel':
+            await query.message.reply_text("Operation cancelled.")
+            return ConversationHandler.END
+            
     return ConversationHandler.END
 
 async def process_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -256,6 +268,7 @@ async def process_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # Clear user data
         context.user_data.clear()
         logger.info("Conversion process completed successfully")
+        return ConversationHandler.END
         
     except Exception as e:
         logger.error(f"Error during conversion: {str(e)}", exc_info=True)
@@ -267,6 +280,7 @@ async def process_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except:
                 pass
         context.user_data.clear()
+        return ConversationHandler.END
 
 async def handle_filename(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the filename input."""
