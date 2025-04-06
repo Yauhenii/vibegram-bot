@@ -1,221 +1,267 @@
 import os
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler, CallbackQueryHandler
+import asyncio
 import ffmpeg
 import tempfile
+import shutil
 from datetime import datetime
+from dotenv import load_dotenv
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, ConversationHandler, filters
+from pytube import YouTube
+import urllib3
 
-# Enable logging
+# Load environment variables
+load_dotenv()
+
+# Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Conversation states
-CHOOSING_CONVERSION_TYPE = 1
-CHOOSING_FORMAT = 2
-CHOOSING_QUALITY = 3
-WAITING_FOR_FILENAME = 4
+# Define conversation states
+SELECTING_FORMAT, SELECTING_QUALITY, SELECTING_CONVERSION_TYPE, ENTERING_FILENAME = range(4)
 
-# Quality presets
+# Define quality presets
 QUALITY_PRESETS = {
     'low': {
-        'mp3': '96k',
-        'wav': '16k',
-        'ogg': '64k'
+        'mp3': '128k',
+        'wav': '44100',
+        'ogg': '96k'
     },
     'medium': {
         'mp3': '192k',
-        'wav': '32k',
+        'wav': '48000',
         'ogg': '128k'
     },
     'high': {
         'mp3': '320k',
-        'wav': '48k',
-        'ogg': '256k'
+        'wav': '96000',
+        'ogg': '192k'
     }
 }
 
-def generate_default_filename(file_type):
-    """Generate a default filename based on current timestamp and file type."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"{file_type}_{timestamp}"
+# Queue system
+class ConversionQueue:
+    def __init__(self):
+        self.queue = []
+        self.progress = {}
+        self.lock = asyncio.Lock()
+    
+    async def add_to_queue(self, user_id, file_path, conversion_type, format, quality, filename):
+        async with self.lock:
+            self.queue.append({
+                'user_id': user_id,
+                'file_path': file_path,
+                'conversion_type': conversion_type,
+                'format': format,
+                'quality': quality,
+                'filename': filename,
+                'status': 'waiting',
+                'progress': 0
+            })
+            return len(self.queue)
+    
+    async def update_progress(self, user_id, progress):
+        async with self.lock:
+            for item in self.queue:
+                if item['user_id'] == user_id:
+                    item['progress'] = progress
+                    break
+    
+    async def get_queue_position(self, user_id):
+        async with self.lock:
+            for i, item in enumerate(self.queue):
+                if item['user_id'] == user_id:
+                    return i + 1
+            return None
+    
+    async def remove_from_queue(self, user_id):
+        async with self.lock:
+            self.queue = [item for item in self.queue if item['user_id'] != user_id]
+
+# Initialize queue
+conversion_queue = ConversionQueue()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send a message when the command /start is issued."""
     await update.message.reply_text(
-        'Hi! I am an audio converter bot.\n'
-        '• Send me any audio file and I will convert it to your preferred format\n'
-        '• Send me a voice message and I will convert it to your preferred format\n'
-        '• Use /help to see available formats and quality settings'
+        'Hi! I can convert audio files to different formats. '
+        'Send me an audio file or a YouTube link to get started!'
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send a message when the command /help is issued."""
-    help_text = (
-        "Available commands:\n"
-        "/start - Start the bot\n"
-        "/help - Show this help message\n"
-        "/cancel - Cancel current operation\n\n"
-        "Supported formats:\n"
-        "• MP3 - Most compatible format\n"
-        "• WAV - High quality, uncompressed\n"
-        "• OGG - Good quality, smaller size\n\n"
-        "Quality settings:\n"
-        "• Low - Smaller file size\n"
-        "• Medium - Balanced quality and size\n"
-        "• High - Best quality, larger file size"
-    )
+    help_text = """
+Available commands:
+/start - Start the bot
+/help - Show this help message
+/queue - Show your position in the conversion queue
+/cancel - Cancel your current conversion
+
+Supported formats:
+- MP3
+- WAV
+- OGG (including voice messages)
+
+Quality presets:
+- Low (smaller file size)
+- Medium (balanced)
+- High (best quality)
+    """
     await update.message.reply_text(help_text)
 
-async def show_conversion_type_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show conversion type selection buttons."""
-    keyboard = [
-        [
-            InlineKeyboardButton("Convert to Audio", callback_data='type_audio'),
-            InlineKeyboardButton("Convert to Voice", callback_data='type_voice')
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    if update.callback_query:
-        await update.callback_query.message.reply_text('What would you like to convert this to?', reply_markup=reply_markup)
+async def queue_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show the user's position in the conversion queue."""
+    user_id = update.effective_user.id
+    position = await conversion_queue.get_queue_position(user_id)
+    
+    if position is None:
+        await update.message.reply_text("You don't have any files in the conversion queue.")
     else:
-        await update.message.reply_text('What would you like to convert this to?', reply_markup=reply_markup)
+        await update.message.reply_text(f"Your file is in position {position} in the queue.")
 
-async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle audio files and forwarded messages."""
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel the user's current conversion."""
+    user_id = update.effective_user.id
+    await conversion_queue.remove_from_queue(user_id)
+    await update.message.reply_text("Your conversion has been cancelled.")
+
+async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle audio files."""
     try:
-        audio = update.message.audio
-        if not audio:
+        # Get the file
+        audio_file = update.message.audio or update.message.voice
+        if not audio_file:
             await update.message.reply_text("Please send an audio file.")
             return ConversationHandler.END
-            
+
         # Download the file
-        file = await context.bot.get_file(audio.file_id)
-        file_path = f"temp_{audio.file_id}.{audio.file_name.split('.')[-1]}"
+        file = await context.bot.get_file(audio_file.file_id)
+        file_path = f"temp_{audio_file.file_id}.{audio_file.file_name.split('.')[-1] if hasattr(audio_file, 'file_name') else 'ogg'}"
         await file.download_to_drive(file_path)
-        
-        # Store file path and show conversion type options
+
+        # Store file path and original voice message if it's a voice message
         context.user_data['file_path'] = file_path
-        context.user_data['original_type'] = 'audio'
+        if update.message.voice:
+            context.user_data['original_voice'] = audio_file
+
+        # Show conversion type buttons
         await show_conversion_type_buttons(update, context)
-        return CHOOSING_CONVERSION_TYPE
-            
+        return SELECTING_CONVERSION_TYPE
+
     except Exception as e:
-        await update.message.reply_text(f"Error processing audio: {str(e)}")
+        logger.error(f"Error handling audio: {str(e)}", exc_info=True)
+        await update.message.reply_text("Sorry, something went wrong. Please try again.")
         return ConversationHandler.END
 
-async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle voice messages."""
+async def handle_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle YouTube links."""
     try:
-        voice = update.message.voice
-        if not voice:
-            await update.message.reply_text("Please send a voice message.")
+        url = update.message.text
+        yt = YouTube(url)
+        audio_stream = yt.streams.filter(only_audio=True).first()
+        
+        if not audio_stream:
+            await update.message.reply_text("No audio stream found in the video.")
             return ConversationHandler.END
-            
-        # Download the file
-        file = await context.bot.get_file(voice.file_id)
-        file_path = f"temp_{voice.file_id}.ogg"  # Voice messages are in OGG format
-        await file.download_to_drive(file_path)
-        
-        # Store file path and original voice metadata
+
+        # Download the audio
+        file_path = f"temp_{yt.video_id}.{audio_stream.subtype}"
+        audio_stream.download(filename=file_path)
+
+        # Store file path
         context.user_data['file_path'] = file_path
-        context.user_data['original_type'] = 'voice'
-        context.user_data['original_voice'] = voice  # Store the original voice message object
-        
+
+        # Show conversion type buttons
         await show_conversion_type_buttons(update, context)
-        return CHOOSING_CONVERSION_TYPE
-            
+        return SELECTING_CONVERSION_TYPE
+
     except Exception as e:
-        await update.message.reply_text(f"Error processing voice message: {str(e)}")
+        logger.error(f"Error handling YouTube link: {str(e)}", exc_info=True)
+        await update.message.reply_text("Sorry, something went wrong. Please try again.")
         return ConversationHandler.END
+
+async def show_conversion_type_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show buttons for selecting conversion type."""
+    keyboard = [
+        [
+            InlineKeyboardButton("Convert to Audio", callback_data='audio'),
+            InlineKeyboardButton("Convert to Voice", callback_data='voice')
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    message = update.message if update.message else update.callback_query.message
+    await message.reply_text("How would you like to convert the file?", reply_markup=reply_markup)
 
 async def show_format_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show format selection buttons."""
+    """Show buttons for selecting format."""
     keyboard = [
         [
-            InlineKeyboardButton("MP3", callback_data='format_mp3'),
-            InlineKeyboardButton("WAV", callback_data='format_wav'),
-            InlineKeyboardButton("OGG", callback_data='format_ogg')
+            InlineKeyboardButton("MP3", callback_data='mp3'),
+            InlineKeyboardButton("WAV", callback_data='wav'),
+            InlineKeyboardButton("OGG", callback_data='ogg')
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    if update.callback_query:
-        await update.callback_query.message.reply_text('Please choose the format:', reply_markup=reply_markup)
-    else:
-        await update.message.reply_text('Please choose the format:', reply_markup=reply_markup)
+    
+    message = update.message if update.message else update.callback_query.message
+    await message.reply_text("Select the output format:", reply_markup=reply_markup)
 
 async def show_quality_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show quality selection buttons."""
+    """Show buttons for selecting quality."""
     keyboard = [
         [
-            InlineKeyboardButton("Low", callback_data='quality_low'),
-            InlineKeyboardButton("Medium", callback_data='quality_medium'),
-            InlineKeyboardButton("High", callback_data='quality_high')
+            InlineKeyboardButton("Low", callback_data='low'),
+            InlineKeyboardButton("Medium", callback_data='medium'),
+            InlineKeyboardButton("High", callback_data='high')
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    if update.callback_query:
-        await update.callback_query.message.reply_text('Please choose the quality:', reply_markup=reply_markup)
-    else:
-        await update.message.reply_text('Please choose the quality:', reply_markup=reply_markup)
+    
+    message = update.message if update.message else update.callback_query.message
+    await message.reply_text("Select the quality:", reply_markup=reply_markup)
 
-async def show_filename_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show filename options."""
-    default_filename = context.user_data.get('default_filename', '')
-    keyboard = [
-        [
-            InlineKeyboardButton("Use Default", callback_data='filename_default'),
-            InlineKeyboardButton("Custom Name", callback_data='filename_custom')
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.message.reply_text(
-        f'Default filename: {default_filename}\nWould you like to use this name or provide a custom one?',
-        reply_markup=reply_markup
-    )
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle button presses."""
     query = update.callback_query
     await query.answer()
     
-    if query.data.startswith('type_'):
-        conversion_type = query.data.split('_')[1]
-        context.user_data['conversion_type'] = conversion_type
-        if conversion_type == 'voice':
-            # Skip format, quality, and filename selection for voice messages
-            context.user_data['format'] = 'ogg'  # Voice messages are always OGG
-            context.user_data['quality'] = 'medium'  # Use default quality
-            context.user_data['filename'] = generate_default_filename('voice')
-            await process_conversion(update, context)
-            return ConversationHandler.END
+    if query.data in ['audio', 'voice']:
+        context.user_data['conversion_type'] = query.data
+        if query.data == 'voice':
+            # For voice messages, skip format selection and use OGG
+            context.user_data['format'] = 'ogg'
+            await show_quality_buttons(update, context)
+            return SELECTING_QUALITY
         else:
             await show_format_buttons(update, context)
-            return CHOOSING_FORMAT
-    elif query.data.startswith('format_'):
-        context.user_data['format'] = query.data.split('_')[1]
+            return SELECTING_FORMAT
+    
+    elif query.data in ['mp3', 'wav', 'ogg']:
+        context.user_data['format'] = query.data
         await show_quality_buttons(update, context)
-        return CHOOSING_QUALITY
-    elif query.data.startswith('quality_'):
-        context.user_data['quality'] = query.data.split('_')[1]
-        await query.message.reply_text("Please send me the desired filename (without extension):")
-        return WAITING_FOR_FILENAME
-    elif query.data.startswith('filename_'):
-        choice = query.data.split('_')[1]
-        if choice == 'default':
-            context.user_data['filename'] = generate_default_filename(context.user_data.get('original_type', 'audio'))
-            await process_conversion(update, context)
-            return ConversationHandler.END
-        elif choice == 'custom':
-            await query.message.reply_text("Please send me the desired filename (without extension):")
-            return WAITING_FOR_FILENAME
-        elif choice == 'cancel':
-            await query.message.reply_text("Operation cancelled.")
-            return ConversationHandler.END
-            
+        return SELECTING_QUALITY
+    
+    elif query.data in ['low', 'medium', 'high']:
+        context.user_data['quality'] = query.data
+        message = query.message if query.message else update.message
+        await message.reply_text("Please enter a filename (without extension) or press /skip to use the default name:")
+        return ENTERING_FILENAME
+
+async def handle_filename(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle filename input."""
+    context.user_data['filename'] = update.message.text
+    await process_conversion(update, context)
+    return ConversationHandler.END
+
+async def skip_filename(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Skip filename input and use default."""
+    context.user_data['filename'] = ''
+    await process_conversion(update, context)
     return ConversationHandler.END
 
 async def process_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -236,6 +282,30 @@ async def process_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await message.reply_text("Something went wrong. Please try sending the file again.")
             return ConversationHandler.END
 
+        # Add to queue and get position
+        queue_position = await conversion_queue.add_to_queue(
+            update.effective_user.id,
+            file_path,
+            conversion_type,
+            output_format,
+            quality,
+            filename
+        )
+        
+        # Send initial queue message
+        message = update.message if update.message else update.callback_query.message
+        queue_message = await message.reply_text(f"Your file has been added to the queue. Position: {queue_position}")
+        
+        # Wait for turn in queue
+        while queue_position > 1:
+            queue_position = await conversion_queue.get_queue_position(update.effective_user.id)
+            if queue_position is None:  # User cancelled
+                return ConversationHandler.END
+            await asyncio.sleep(1)
+        
+        # Update status to processing
+        await queue_message.edit_text("Processing your file... 0%")
+        
         # Get quality settings
         quality_settings = QUALITY_PRESETS[quality][output_format]
         logger.info(f"Using quality settings: {quality_settings}")
@@ -269,17 +339,45 @@ async def process_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 stream = ffmpeg.output(stream, output_path,
                                      audio_bitrate=quality_settings,
                                      acodec='libvorbis')
-            
-        ffmpeg.run(stream, overwrite_output=True)
+        
+        # Run conversion with progress tracking
+        process = (
+            ffmpeg
+            .input(file_path)
+            .output(output_path, **stream.get_args()[1])
+            .overwrite_output()
+            .run_async(pipe_stdout=True, pipe_stderr=True)
+        )
+        
+        # Monitor progress
+        total_duration = None
+        while True:
+            line = process.stderr.readline().decode('utf-8')
+            if not line:
+                break
+                
+            # Extract duration and time
+            if 'Duration:' in line:
+                duration_str = line.split('Duration:')[1].split(',')[0].strip()
+                h, m, s = map(float, duration_str.split(':'))
+                total_duration = h * 3600 + m * 60 + s
+            elif 'time=' in line:
+                time_str = line.split('time=')[1].split(' ')[0]
+                h, m, s = map(float, time_str.split(':'))
+                current_time = h * 3600 + m * 60 + s
+                if total_duration:
+                    progress = int((current_time / total_duration) * 100)
+                    await conversion_queue.update_progress(update.effective_user.id, progress)
+                    await queue_message.edit_text(f"Processing your file... {progress}%")
+        
+        process.wait()
         logger.info("ffmpeg conversion completed")
         
         # Send the converted file
         logger.info(f"Sending converted file as {conversion_type}")
         with open(output_path, 'rb') as audio_file:
             if conversion_type == 'voice':
-                # For voice messages, we need to preserve the original file's metadata
                 if 'original_voice' in context.user_data:
-                    # If the original was a voice message, use its metadata
                     original_voice = context.user_data['original_voice']
                     await context.bot.send_voice(
                         chat_id=update.effective_chat.id,
@@ -287,7 +385,6 @@ async def process_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         duration=original_voice.duration
                     )
                 else:
-                    # For audio files converted to voice, generate a simple waveform
                     await context.bot.send_voice(
                         chat_id=update.effective_chat.id,
                         voice=audio_file
@@ -298,70 +395,48 @@ async def process_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     audio=audio_file,
                     title=f"{filename}.{output_format}"
                 )
-            
+        
         # Clean up
-        logger.info("Cleaning up temporary files")
         os.remove(file_path)
         os.remove(output_path)
+        await conversion_queue.remove_from_queue(update.effective_user.id)
         
-        # Clear user data
-        context.user_data.clear()
-        logger.info("Conversion process completed successfully")
         return ConversationHandler.END
-        
+
     except Exception as e:
-        logger.error(f"Error during conversion: {str(e)}", exc_info=True)
+        logger.error(f"Error in conversion process: {str(e)}", exc_info=True)
         message = update.message if update.message else update.callback_query.message
-        await message.reply_text(f"Error during conversion: {str(e)}")
-        # Clean up any remaining files
-        if 'file_path' in context.user_data:
-            try:
-                os.remove(context.user_data['file_path'])
-            except:
-                pass
-        context.user_data.clear()
+        await message.reply_text("Sorry, something went wrong during the conversion. Please try again.")
+        await conversion_queue.remove_from_queue(update.effective_user.id)
         return ConversationHandler.END
-
-async def handle_filename(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the filename input."""
-    filename = update.message.text.strip()
-    if not filename:
-        await update.message.reply_text("Please provide a valid filename.")
-        return WAITING_FOR_FILENAME
-        
-    context.user_data['filename'] = filename
-    await process_conversion(update, context)
-    return ConversationHandler.END
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel the conversation."""
-    context.user_data.clear()
-    await update.message.reply_text("Operation cancelled.")
-    return ConversationHandler.END
 
 def main():
     """Start the bot."""
     # Create the Application and pass it your bot's token
-    application = Application.builder().token(os.getenv('TELEGRAM_BOT_TOKEN')).build()
+    application = Application.builder().token(os.getenv('TELEGRAM_TOKEN')).build()
 
-    # Create conversation handler
+    # Add conversation handler
     conv_handler = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.AUDIO, handle_audio),
-            MessageHandler(filters.VOICE, handle_voice)
+            MessageHandler(filters.AUDIO | filters.VOICE, handle_audio),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_youtube)
         ],
         states={
-            CHOOSING_CONVERSION_TYPE: [CallbackQueryHandler(button_handler)],
-            CHOOSING_FORMAT: [CallbackQueryHandler(button_handler)],
-            CHOOSING_QUALITY: [CallbackQueryHandler(button_handler)],
-            WAITING_FOR_FILENAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_filename)]
+            SELECTING_CONVERSION_TYPE: [CallbackQueryHandler(button_handler)],
+            SELECTING_FORMAT: [CallbackQueryHandler(button_handler)],
+            SELECTING_QUALITY: [CallbackQueryHandler(button_handler)],
+            ENTERING_FILENAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_filename),
+                CommandHandler('skip', skip_filename)
+            ]
         },
-        fallbacks=[CommandHandler("cancel", cancel)]
+        fallbacks=[CommandHandler('cancel', cancel_command)]
     )
 
     # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("queue", queue_command))
     application.add_handler(conv_handler)
 
     # Start the Bot
