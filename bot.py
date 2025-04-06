@@ -258,13 +258,16 @@ async def process_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE)
                                  ar=quality_settings)
         elif output_format == 'ogg':
             stream = ffmpeg.input(file_path)
-            # Use Telegram's preferred settings for voice messages
-            stream = ffmpeg.output(stream, output_path,
-                                 audio_bitrate='64k',  # Fixed bitrate for voice messages
-                                 acodec='libopus',     # Use Opus codec like Telegram
-                                 ar='48000',           # 48kHz sample rate
-                                 ac=1,                 # Mono channel
-                                 application='voip')   # Optimize for voice
+            if conversion_type == 'voice':
+                # For voice messages, preserve the original characteristics
+                stream = ffmpeg.output(stream, output_path,
+                                     acodec='copy',  # Don't re-encode, just copy the stream
+                                     f='ogg')        # Force OGG container
+            else:
+                # For regular OGG conversion, use standard settings
+                stream = ffmpeg.output(stream, output_path,
+                                     audio_bitrate=quality_settings,
+                                     acodec='libvorbis')
             
         ffmpeg.run(stream, overwrite_output=True)
         logger.info("ffmpeg conversion completed")
