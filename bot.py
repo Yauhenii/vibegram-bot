@@ -79,7 +79,10 @@ async def show_conversion_type_buttons(update: Update, context: ContextTypes.DEF
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text('What would you like to convert this to?', reply_markup=reply_markup)
+    if update.callback_query:
+        await update.callback_query.message.reply_text('What would you like to convert this to?', reply_markup=reply_markup)
+    else:
+        await update.message.reply_text('What would you like to convert this to?', reply_markup=reply_markup)
 
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle audio files and forwarded messages."""
@@ -137,7 +140,10 @@ async def show_format_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text('Please choose the output format:', reply_markup=reply_markup)
+    if update.callback_query:
+        await update.callback_query.message.reply_text('Please choose the format:', reply_markup=reply_markup)
+    else:
+        await update.message.reply_text('Please choose the format:', reply_markup=reply_markup)
 
 async def show_quality_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show quality selection buttons."""
@@ -149,7 +155,10 @@ async def show_quality_buttons(update: Update, context: ContextTypes.DEFAULT_TYP
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.message.reply_text('Please choose the quality:', reply_markup=reply_markup)
+    if update.callback_query:
+        await update.callback_query.message.reply_text('Please choose the quality:', reply_markup=reply_markup)
+    else:
+        await update.message.reply_text('Please choose the quality:', reply_markup=reply_markup)
 
 async def show_filename_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show filename options."""
