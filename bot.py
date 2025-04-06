@@ -161,6 +161,13 @@ async def handle_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle YouTube links."""
     try:
         url = update.message.text
+        
+        # Convert YouTube Shorts URL to regular YouTube URL if needed
+        if 'youtube.com/shorts/' in url:
+            video_id = url.split('youtube.com/shorts/')[1].split('?')[0]
+            url = f'https://www.youtube.com/watch?v={video_id}'
+            logger.info(f"Converted Shorts URL to regular URL: {url}")
+        
         yt = YouTube(url)
         audio_stream = yt.streams.filter(only_audio=True).first()
         
