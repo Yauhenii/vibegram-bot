@@ -120,9 +120,11 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         file_path = f"temp_{voice.file_id}.ogg"  # Voice messages are in OGG format
         await file.download_to_drive(file_path)
         
-        # Store file path and show conversion type options
+        # Store file path and original voice metadata
         context.user_data['file_path'] = file_path
         context.user_data['original_type'] = 'voice'
+        context.user_data['original_voice'] = voice  # Store the original voice message object
+        
         await show_conversion_type_buttons(update, context)
         return CHOOSING_CONVERSION_TYPE
             
@@ -266,10 +268,22 @@ async def process_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.info(f"Sending converted file as {conversion_type}")
         with open(output_path, 'rb') as audio_file:
             if conversion_type == 'voice':
-                await context.bot.send_voice(
-                    chat_id=update.effective_chat.id,
-                    voice=audio_file
-                )
+                # For voice messages, we need to preserve the original file's metadata
+                if 'original_voice' in context.user_data:
+                    # If the original was a voice message, use its metadata
+                    original_voice = context.user_data['original_voice']
+                    await context.bot.send_voice(
+                        chat_id=update.effective_chat.id,
+                        voice=audio_file,
+                        duration=original_voice.duration,
+                        waveform=original_voice.waveform if hasattr(original_voice, 'waveform') else None
+                    )
+                else:
+                    # For audio files converted to voice, generate a simple waveform
+                    await context.bot.send_voice(
+                        chat_id=update.effective_chat.id,
+                        voice=audio_file
+                    )
             else:
                 await context.bot.send_audio(
                     chat_id=update.effective_chat.id,
