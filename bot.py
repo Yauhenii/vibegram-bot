@@ -259,12 +259,13 @@ async def process_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE)
         elif output_format == 'ogg':
             stream = ffmpeg.input(file_path)
             if conversion_type == 'voice':
-                # For voice messages, preserve the original characteristics
                 stream = ffmpeg.output(stream, output_path,
-                                     acodec='copy',  # Don't re-encode, just copy the stream
-                                     f='ogg')        # Force OGG container
+                                     acodec='libopus',
+                                     audio_bitrate='64k',
+                                     ar='48000',
+                                     ac=1,
+                                     application='voip')
             else:
-                # For regular OGG conversion, use standard settings
                 stream = ffmpeg.output(stream, output_path,
                                      audio_bitrate=quality_settings,
                                      acodec='libvorbis')
